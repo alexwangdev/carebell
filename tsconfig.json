@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "lib": ["ES2022"],
+    "moduleResolution": "node",
+    "strict": false,
+    "noImplicitAny": false,
+    "useUnknownInCatchVariables": false,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "types": ["node"],
+    "rootDir": ".",
+    "allowJs": false
+  },
+  "include": ["lib/**/*.ts", "server.ts", "test/**/*.ts", "types/**/*.d.ts", "app/src/commands.ts"],
+  "exclude": ["app", "public", "node_modules"]
+}

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CareBell door watch</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-size="large">
+  <a class="skip" href="#content">Skip to content</a>
+  <div id="banner"></div>
+  <header class="wrap head">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
+        <rect width="64" height="64" rx="18" fill="#9a3412"/>
+        <path d="M32 14c-8 0-14 6-14 14v8l-4 5h36l-4-5v-8c0-8-6-14-14-14z" fill="#fff8e8"/>
+        <circle cx="32" cy="48" r="4" fill="#fff8e8"/>
+      </svg>
+      <div>
+        <p class="eyebrow">Door watch for someone living alone</p>
+        <h1>CareBell</h1>
+      </div>
+    </div>
+    <p class="lede">Turn what the doorbell sees into words the household can read, hear, and act on.</p>
+    <div class="size-toggle" role="group" aria-label="Text size">
+      <button type="button" id="size-standard">Standard text</button>
+      <button type="button" id="size-large" aria-pressed="true">Large text</button>
+    </div>
+    <nav id="nav" aria-label="Main sections"></nav>
+    <p id="mode" class="mode"></p>
+    <button type="button" id="sign-out" hidden>Sign out</button>
+  </header>
+  <main id="content" class="wrap" tabindex="-1">
+    <p>Opening door watch…</p>
+  </main>
+  <footer class="wrap foot">
+    <p>Records stay on this CareBell server for the family to review. Subscriptions and Chime volume are managed in Ring My Apps.</p>
+  </footer>
+  <div id="live" class="sr-only" aria-live="assertive"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
