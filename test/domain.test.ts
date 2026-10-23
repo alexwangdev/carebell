@@ -8,6 +8,12 @@ import {
   routineStatus,
   buildSampleDay,
   translateWebhook,
+  alreadyHaveDoorMoment,
+  suppressRepeatVisionAlert,
+  shouldRaiseDoorAlert,
+  holdPlaygroundDing,
+  applyPlaygroundDingHold,
+  restoreHeldDing,
   zonedParts,
   zonedTimeToUtc,
   defaultSettings,
@@ -67,6 +73,31 @@ test('hmac accepts the raw body and rejects a different body', () => {
   assert.equal(verifySignature(raw, signature, 'local-key'), true);
   assert.equal(verifySignature(Buffer.from('{"data":{"type":"button_press"}} '), signature, 'local-key'), false);
   assert.equal(verifySignature(raw, signature, 'other-key'), false);
+});
+
+test('an open package alert is not stacked', () => {
+  const open = { kind: 'package', at: '2026-10-23T17:04:00.000Z', acked: false, drill: false };
+  const seen = { kind: 'package', at: '2026-10-23T17:04:00.000Z', acked: true, drill: false };
+  assert.equal(suppressRepeatVisionAlert([open], 'package', Date.parse('2026-10-23T18:00:00.000Z')), true);
+  assert.equal(suppressRepeatVisionAlert([seen], 'package', Date.parse('2026-10-23T17:06:00.000Z')), false);
+  assert.equal(alreadyHaveDoorMoment([{ timestampMs: 1_000 }], 1_400), true);
+  assert.equal(alreadyHaveDoorMoment([{ timestampMs: 1_000 }], 200_000), false);
+  assert.equal(alreadyHaveDoorMoment([{ timestampMs: 1_000, kind: 'person' }], 1_400, 'package'), true);
+  assert.equal(alreadyHaveDoorMoment([{ timestampMs: 1_000, kind: 'vehicle' }], 1_400, 'person'), false);
+  assert.equal(shouldRaiseDoorAlert([open], 'person', Date.parse('2026-10-23T17:06:00.000Z')), false);
+  assert.equal(shouldRaiseDoorAlert([seen], 'person', Date.parse('2026-10-23T17:06:00.000Z')), true);
+  assert.equal(shouldRaiseDoorAlert([seen], 'fall', Date.parse('2026-10-23T17:06:00.000Z')), true);
+});
+
+test('a Playground ding is not a doorbell press until the clip is checked', () => {
+  assert.equal(holdPlaygroundDing('doorbell', 'playground'), true);
+  assert.equal(holdPlaygroundDing('doorbell', 'ring'), false);
+  const event = { kind: 'doorbell', deviceName: 'Playground Device', title: '', detail: '', notifyKey: 'doorbell', level: 'critical', ringType: '' };
+  assert.equal(applyPlaygroundDingHold(event, 'playground'), true);
+  assert.equal(event.kind, 'person');
+  assert.equal(event.ringType, 'ding');
+  assert.equal(restoreHeldDing(event), true);
+  assert.equal(event.kind, 'doorbell');
 });
 
 test('motion human subtype becomes a person at the door', () => {

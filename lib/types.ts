@@ -82,6 +82,7 @@ export interface DoorEvent {
   snapshotUrl?: string;
   snapshotNote?: string;
   snapshotChecked?: boolean;
+  sceneChecked?: boolean;
   familiarName?: string;
   familiarRelation?: string;
   photoHash?: string;
@@ -91,6 +92,7 @@ export interface DoorEvent {
   sample?: boolean;
   drill?: boolean;
   requestId?: string;
+  ringType?: string;
   notifyKey?: AlertKey | string | null;
   level?: 'critical' | 'notice' | string;
   alwaysNotify?: boolean;

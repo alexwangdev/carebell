@@ -6,6 +6,7 @@ app/.env
 app/.claude/
 .cursor/
 public/app.js
+public/opencv.js
 tools/patch-server-types.js
 data/*
 !data/.gitkeep

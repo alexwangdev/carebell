@@ -511,14 +511,21 @@ export async function downloadClip(timestampMs: number, durationMs?: number) {
   };
 }
 
-export async function openLive(sdp: string) {
+export function streamingDeviceId(deviceId?: string): string {
+  const chosen = String(deviceId || '').trim();
+  if (/^ava1\.ring\.device\.[A-Z0-9]+$/.test(chosen)) return chosen;
+  return '';
+}
+
+export async function openLive(sdp: string, deviceId?: string) {
   const home = await household();
-  if (!home.doorbellId) return { ok: false, error: 'No doorbell was found on this Playground token.' };
+  const doorbellId = streamingDeviceId(deviceId) || home.doorbellId;
+  if (!doorbellId) return { ok: false, error: 'No doorbell was found on this Playground token.' };
   const offer = addH265ToSdp(sdp);
   if (!/^v=/.test(offer) || !offer.includes('m=video') || !offer.includes('a=recvonly')) {
     return { ok: false, error: 'The live view could not start. Please try again.' };
   }
-  const response = await ringFetch(`/v1/devices/${encodeURIComponent(home.doorbellId)}/media/streaming/whep/sessions`, {
+  const response = await ringFetch(`/v1/devices/${encodeURIComponent(doorbellId)}/media/streaming/whep/sessions`, {
     method: 'POST',
     raw: offer,
     timeout: 15000

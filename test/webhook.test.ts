@@ -116,6 +116,15 @@ test('a no-activity drill alerts the emergency contact', async () => {
   assert.match(drilled.banner.detail, /practice/);
 });
 
+test('the OpenCV tester page is available at its own address', async () => {
+  const response = await fetch(`${base}/opencv`);
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Test a door file/);
+  assert.match(html, /Playground access token/);
+  assert.match(html, /\/opencv\.js/);
+});
+
 test('a loaded MP4 recording can raise a fall alert', async () => {
   const mp4 = await videoFromJpegs([
     sceneJpeg('standing'),
@@ -130,5 +139,5 @@ test('a loaded MP4 recording can raise a fall alert', async () => {
   assert.equal(response.status, 200);
   const state = await response.json() as any;
   assert.equal(state.banner.kind, 'fall');
-  assert.match(state.banner.snapshotNote, /recording you loaded/);
+  assert.equal(state.banner.snapshotNote, '');
 });

@@ -61,7 +61,7 @@ export class DoorWatchAgent {
     const sessionId = input.sessionId || 'once';
     const engine = this.engine(sessionId);
     const prepared = preprocess(cv, rgba, engine.previousGray);
-    const found = detectObjects(cv, prepared.rgba, prepared.motionMask);
+    const found = detectObjects(cv, prepared.sharp || prepared.rgba, prepared.motionMask);
     const yolo = await detectYolo(prepared.rgba);
     const yoloPeople = yolo.filter((item) => item.class === 'person');
     const modelPoses = [

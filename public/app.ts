@@ -49,6 +49,12 @@ let audioCtx = null;
 let bedsideTimer = null;
 let bedsideFor = '';
 let liveSession = null;
+let openingLive = false;
+let lastLiveTourId = '';
+let lastDemoDriveId = '';
+let demoClickTimer = null;
+let pendingTourSpeech = '';
+const demoClipTried = new Set();
 const content = document.getElementById('content');
 const banner = document.getElementById('banner');
 const nav = document.getElementById('nav');
@@ -70,9 +76,11 @@ function el(tag: string, attrs?: any, children?: any[]): any {
 
 function primeAudio() {
   const Ctx = window.AudioContext || (window as any).webkitAudioContext;
-  if (!Ctx) return;
-  audioCtx = audioCtx || new Ctx();
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (Ctx) {
+    audioCtx = audioCtx || new Ctx();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+  if (pendingTourSpeech && touring()) speakTourLine(pendingTourSpeech);
 }
 
 function beep(kind) {
@@ -111,11 +119,29 @@ function announce(text) {
 
 function apply(next) {
   const previousId = state && state.banner ? state.banner.id : '';
+  const nextId = next.banner ? next.banner.id : '';
+  const previousTour = state && state.demoTour;
+  const tour = next.demoTour;
+  const keepLive = Boolean(tour && tour.active && (tour.live || tour.preloadLive));
+  const sameAlert = Boolean(state)
+    && previousId === nextId
+    && state.pending === next.pending
+    && (!state.banner || !next.banner || state.banner.title === next.banner.title);
+  const tourChanged = Boolean(previousTour && previousTour.active) !== Boolean(tour && tour.active)
+    || (previousTour && tour && previousTour.id !== tour.id);
+  if (tour && tour.active && tour.view) view = tour.view;
   state = next;
   renderChrome();
-  if (!liveSession) {
+  if (!sameAlert || tourChanged) {
     renderBanner();
     if (!editingForm()) renderMain();
+  }
+  if (keepLive) {
+    if (!liveSession) queueMicrotask(() => lookNow(el('button', {}, ['Look now'])));
+    else attachVisibleLive();
+  } else if (liveSession && lastLiveTourId && lastLiveTourId !== 'live') {
+    lastLiveTourId = '';
+    stopLive({ silent: true });
   }
   maybeBeep(state.banner);
   syncBedside(state.banner);
@@ -126,6 +152,169 @@ function apply(next) {
   if (!state.banner && previousId) {
     announce('Alert acknowledged.');
     document.title = 'CareBell door watch';
+  }
+  driveDemo();
+}
+
+function touring() {
+  return Boolean(state && state.demoTour && state.demoTour.active);
+}
+
+function tourSpeechText(tour) {
+  const line = String((tour && tour.say) || '').trim();
+  if (tour && tour.id === 'today' && state.today && state.today.summary) {
+    return `${line} ${state.today.summary}`.trim();
+  }
+  return line;
+}
+
+function speakTourLine(text) {
+  pendingTourSpeech = text;
+  if (!window.speechSynthesis || !text) return;
+  speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'en-US';
+  utterance.rate = 0.95;
+  const voices = speechSynthesis.getVoices();
+  const voice = voices.find((item) => /^en(-|_)US/i.test(item.lang)) || voices.find((item) => /^en/i.test(item.lang));
+  if (voice) utterance.voice = voice;
+  speechSynthesis.speak(utterance);
+}
+
+function stopTourSpeech() {
+  pendingTourSpeech = '';
+  if (window.speechSynthesis) speechSynthesis.cancel();
+}
+
+function driveDemo() {
+  if (!touring()) {
+    lastDemoDriveId = '';
+    stopTourSpeech();
+    clearDemoPreload();
+    if (demoClickTimer) {
+      clearInterval(demoClickTimer);
+      demoClickTimer = null;
+    }
+    return;
+  }
+  document.querySelectorAll('dialog').forEach((dialog: any) => {
+    localStorage.setItem('carebell-intro', '1');
+    dialog.close();
+    dialog.remove();
+  });
+  String(state.demoTour.preloadClip || '').split(',').forEach((name) => {
+    const file = name.trim();
+    if (file) preloadDemoClip(file);
+  });
+  if (state.demoTour.preloadShot) preloadDemoShot(state.demoTour.preloadShot);
+  playDemoMedia();
+  const tour = state.demoTour;
+  if (tour.id === lastDemoDriveId) return;
+  lastDemoDriveId = tour.id;
+  speakTourLine(tourSpeechText(tour));
+  if (demoClickTimer) {
+    clearInterval(demoClickTimer);
+    demoClickTimer = null;
+  }
+  if (tour.view === 'log') {
+    const sequence = tour.logKind ? [tour.logKind, 'package', 'fall', 'loitering', 'all'] : ['knock', 'package', 'fall', 'all'];
+    let index = 0;
+    const clickFilter = () => {
+      if (!touring() || state.demoTour.id !== tour.id) return;
+      logKind = sequence[index % sequence.length];
+      logDay = 'all';
+      index += 1;
+      if (!editingForm()) renderMain();
+      playDemoMedia();
+    };
+    clickFilter();
+    demoClickTimer = setInterval(clickFilter, 2000);
+  }
+}
+
+function playDemoMedia() {
+  document.querySelectorAll('video').forEach((video: any) => {
+    if (video.id === 'demo-live-video' || video.id === 'demo-knock-video' || String(video.id || '').startsWith('demo-clip-')) return;
+    video.muted = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.play().catch(() => {});
+  });
+}
+
+function hidePreloadVideo(video: any) {
+  video.setAttribute('aria-hidden', 'true');
+  Object.assign(video.style, {
+    position: 'fixed',
+    width: '2px',
+    height: '2px',
+    opacity: '0',
+    pointerEvents: 'none',
+    left: '0',
+    top: '0'
+  });
+}
+
+function hiddenLiveVideo(): HTMLVideoElement {
+  let video = document.getElementById('demo-live-video') as HTMLVideoElement | null;
+  if (!video) {
+    video = el('video', { id: 'demo-live-video', class: 'live-view', autoplay: true, muted: true, playsinline: true });
+    hidePreloadVideo(video);
+    document.body.append(video);
+  }
+  return video;
+}
+
+function preloadDemoClip(name) {
+  const src = `/media/${String(name || '').replace(/^.*[\\/]/, '')}`;
+  const id = `demo-clip-${src.replace(/[^a-zA-Z0-9]/g, '')}`;
+  let video = document.getElementById(id) as HTMLVideoElement | null;
+  if (!video) {
+    video = el('video', { id, muted: true, playsinline: true, preload: 'auto' });
+    hidePreloadVideo(video);
+    document.body.append(video);
+  }
+  if (video.dataset.src !== src) {
+    video.dataset.src = src;
+    video.src = src;
+    video.load();
+    fetch(src, { credentials: 'same-origin' }).catch(() => {});
+  }
+}
+
+function preloadDemoShot(name) {
+  const src = `/media/${String(name || '').replace(/^.*[\\/]/, '')}`;
+  const image = new Image();
+  image.src = src;
+}
+
+function clearDemoPreload() {
+  document.querySelectorAll('[id^="demo-clip-"], #demo-live-video, #demo-knock-video').forEach((node) => node.remove());
+}
+
+function attachVisibleLive() {
+  const box = document.getElementById('live-view');
+  const hidden = document.getElementById('demo-live-video') as HTMLVideoElement | null;
+  if (!box || !hidden) return;
+  let video = box.querySelector('video') as HTMLVideoElement | null;
+  if (!video) {
+    video = el('video', { class: 'live-view', autoplay: true, playsinline: true, muted: true });
+    const status = el('p', { role: 'status' }, [
+      hidden.srcObject ? 'Live door view from Ring official streaming.' : 'Opening the live door. About 20 seconds.'
+    ]);
+    box.replaceChildren(status, video);
+  }
+  if (hidden.srcObject && video.srcObject !== hidden.srcObject) {
+    video.srcObject = hidden.srcObject;
+    video.muted = true;
+    video.play().catch(() => {});
+  }
+  const status = box.querySelector('p');
+  const ready = Boolean(hidden.videoWidth || video.videoWidth);
+  if (status) {
+    status.textContent = ready
+      ? 'Live door view from Ring official streaming.'
+      : 'Opening the live door. About 20 seconds.';
   }
 }
 
@@ -150,7 +339,7 @@ function renderChrome() {
   const signOut = document.getElementById('sign-out');
   if (signOut) signOut.hidden = false;
   const playground = state.playground || {};
-  if (playground.error) mode.textContent = playground.error;
+  if (playground.error && !/token expired/i.test(playground.error)) mode.textContent = playground.error;
   else if (playground.connected && playground.source === 'ring') mode.textContent = 'Connected through your Ring account. New door events appear here within about 20 seconds.';
   else if (playground.connected) mode.textContent = 'Connected to the Ring Playground. New door events appear here within about 20 seconds.';
   else mode.textContent = 'Practice mode. The buttons below pretend a door event just happened.';
@@ -158,6 +347,7 @@ function renderChrome() {
 
 function renderBanner() {
   banner.replaceChildren();
+  if (state.demoTour && state.demoTour.active) banner.append(tourStrip());
   if (state.paused) {
     const strip = el('div', { class: 'pause' }, [
       el('div', { class: 'wrap' }, [
@@ -167,7 +357,7 @@ function renderBanner() {
     ]);
     banner.append(strip);
   }
-  if (state.banner && state.settings.bedsideMode && state.banner.level === 'critical') {
+  if (state.banner && state.settings.bedsideMode && state.banner.level === 'critical' && !touring()) {
     banner.append(renderAlert(state.banner, true));
     return;
   }
@@ -182,13 +372,12 @@ function shot(alert) {
     return alert.snapshotNote ? el('p', {}, [alert.snapshotNote]) : document.createTextNode('');
   }
   return el('figure', {}, [
-    el('img', { class: 'shot', src: alert.snapshotUrl, alt: '' }),
-    el('figcaption', {}, [alert.snapshotNote || 'Picture from the door'])
+    el('img', { class: 'shot', src: alert.snapshotUrl, alt: '' })
   ]);
 }
 
 function renderAlert(alert, full) {
-  const bedside = full && state.settings.bedsideMode && alert.level === 'critical';
+  const bedside = full && state.settings.bedsideMode && alert.level === 'critical' && !touring();
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const panel = el('article', {
     class: `panel ${PANELS[alert.kind] || 'panel-motion'}${full ? '' : ' panel-slim'}${bedside ? ` bedside${reduced ? '' : ' flash'}` : ''}`
@@ -200,21 +389,23 @@ function renderAlert(alert, full) {
     full ? el('p', {}, [alert.detail]) : '',
     full && alert.chimeMessage ? el('p', {}, [alert.chimeMessage]) : '',
     full ? clipBlock(alert) : '',
-    full ? liveBlock() : '',
-    state.pending > 1 ? el('p', {}, [`${state.pending - 1} more alert${state.pending - 1 === 1 ? '' : 's'}. Acknowledge this one to see the next.`]) : ''
+    full && !(state.demoTour && (state.demoTour.live || state.demoTour.preloadLive)) ? liveBlock() : '',
+    !touring() && state.pending > 1 ? el('p', {}, [`${state.pending - 1} more alert${state.pending - 1 === 1 ? '' : 's'}. Acknowledge this one to see the next.`]) : ''
   ]);
   const actions = el('div', { class: 'actions' });
-  if (full && state.mode === 'live') {
-    actions.append(el('button', { type: 'button', class: 'btn-primary', onclick: (event) => lookNow(event.currentTarget) }, ['Look now']));
+  if (!touring()) {
+    if (full && (state.mode === 'live' || (state.demoTour && state.demoTour.live))) {
+      actions.append(el('button', { type: 'button', class: 'btn-primary', onclick: (event) => lookNow(event.currentTarget) }, ['Look now']));
+    }
+    if (!full) {
+      actions.append(el('button', { type: 'button', class: 'btn-light', onclick: () => showView('watch') }, ['Open the door view']));
+    }
+    actions.append(el('button', {
+      type: 'button',
+      class: 'btn-light',
+      onclick: () => acknowledge(alert.id)
+    }, ['I have seen this']));
   }
-  if (!full) {
-    actions.append(el('button', { type: 'button', class: 'btn-light', onclick: () => showView('watch') }, ['Open the door view']));
-  }
-  actions.append(el('button', {
-    type: 'button',
-    class: 'btn-light',
-    onclick: () => acknowledge(alert.id)
-  }, ['I have seen this']));
   panel.append(actions);
   if (bedside) {
     queueMicrotask(() => {
@@ -236,11 +427,16 @@ function latestClipEvent(moments) {
 function clipBlock(source) {
   if (!source) return '';
   if (source.clipUrl) {
-    const note = el('p', {}, [source.clipNote || 'This is the recording from that moment at the door.']);
     return el('figure', {}, [
-      el('video', { class: 'clip', controls: true, src: source.clipUrl, playsinline: true }),
-      note
+      el('video', { class: 'clip', controls: true, src: source.clipUrl, playsinline: true, autoplay: touring(), muted: touring() })
     ]);
+  }
+  if (touring() && source.id && !source.sample && ['doorbell', 'person'].includes(source.kind)) {
+    if (!demoClipTried.has(source.id)) {
+      demoClipTried.add(source.id);
+      queueMicrotask(() => loadClip(source.id, el('button', {}, ['Play the clip']), el('p', {}, [''])));
+    }
+    return '';
   }
   if (state.mode !== 'live' || source.sample || !source.id || !['doorbell', 'person'].includes(source.kind)) return '';
   const status = el('p', { role: 'status' }, ['']);
@@ -270,7 +466,7 @@ function liveBlock() {
 }
 
 function syncBedside(alert) {
-  const on = Boolean(alert && state.settings.bedsideMode && alert.level === 'critical');
+  const on = Boolean(alert && state.settings.bedsideMode && alert.level === 'critical' && !touring());
   if (!on) {
     clearInterval(bedsideTimer);
     bedsideTimer = null;
@@ -290,26 +486,31 @@ function syncBedside(alert) {
 }
 
 async function lookNow(button) {
-  button.disabled = true;
-  await stopLive({ silent: true });
-  const box = document.getElementById('live-view');
-  if (!box || !window.RTCPeerConnection) {
-    if (box) box.replaceChildren(el('p', {}, ['This browser cannot open a live view.']));
-    button.disabled = false;
+  if (button) button.disabled = true;
+  if (liveSession || openingLive) {
+    attachVisibleLive();
     return;
   }
-  const status = el('p', { role: 'status' }, ['Opening the door…']);
-  const video = el('video', { class: 'live-view', autoplay: true, playsinline: true, muted: true });
-  const stop = el('button', { type: 'button', onclick: () => stopLive() }, ['Stop']);
-  box.replaceChildren(status, video, stop);
+  openingLive = true;
+  if (!window.RTCPeerConnection) {
+    const box = document.getElementById('live-view');
+    if (box) box.replaceChildren(el('p', {}, ['This browser cannot open a live view.']));
+    if (button) button.disabled = false;
+    openingLive = false;
+    return;
+  }
+  const video = hiddenLiveVideo();
+  attachVisibleLive();
   const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
   liveSession = { pc, timer: null, id: '' };
+  lastLiveTourId = (state.demoTour && state.demoTour.id) || 'live';
   pc.ontrack = (event) => {
     const current = video.srcObject instanceof MediaStream ? video.srcObject : new MediaStream();
     if (!current.getTracks().some((track) => track.id === event.track.id)) current.addTrack(event.track);
     video.srcObject = current;
     video.muted = true;
     video.play().catch(() => {});
+    attachVisibleLive();
   };
   pc.addTransceiver('video', { direction: 'recvonly' });
   try {
@@ -331,33 +532,46 @@ async function lookNow(button) {
     const response = await fetch('/api/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp: pc.localDescription.sdp })
+      body: JSON.stringify({
+        sdp: pc.localDescription.sdp,
+        deviceId: state.demoTour && state.demoTour.deviceId
+      })
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || 'The live view could not start.');
+    if (!liveSession || liveSession.pc !== pc || pc.signalingState === 'closed') return;
     await pc.setRemoteDescription({ type: 'answer', sdp: body.sdp });
     liveSession.id = body.sessionId;
     let left = body.seconds || 30;
-    status.textContent = `Live view. ${left} seconds left. It closes to save the doorbell battery.`;
+    attachVisibleLive();
     liveSession.timer = setInterval(() => {
       left -= 1;
       if (left <= 0) {
-        stopLive();
+        stopLive({ silent: true });
         return;
       }
-      status.textContent = `Live view. ${left} seconds left. It closes to save the doorbell battery.`;
+      const status = document.querySelector('#live-view p');
+      if (status && (video.videoWidth || (document.querySelector('#live-view video') as HTMLVideoElement)?.videoWidth)) {
+        status.textContent = `Live view. ${left} seconds left. It closes to save the doorbell battery.`;
+      } else if (status) {
+        status.textContent = 'Opening the live door. About 20 seconds.';
+      }
     }, 1000);
   } catch (error) {
-    status.textContent = error.message || 'The live view could not start. Please try again.';
-    button.disabled = false;
+    const box = document.getElementById('live-view');
+    if (box) box.replaceChildren(el('p', { role: 'status' }, [error.message || 'The live view could not start. Please try again.']));
+    if (button) button.disabled = false;
     if (liveSession && liveSession.pc) liveSession.pc.close();
     liveSession = null;
+  } finally {
+    openingLive = false;
   }
 }
 
 async function stopLive(options: { silent?: boolean } = {}) {
   const current = liveSession;
   liveSession = null;
+  openingLive = false;
   if (!current) return;
   clearInterval(current.timer);
   if (current.pc) current.pc.close();
@@ -367,50 +581,6 @@ async function stopLive(options: { silent?: boolean } = {}) {
   if (options.silent) return;
   renderBanner();
   if (!editingForm()) renderMain();
-}
-
-function clipBar() {
-  const hint = el('p', { class: 'hint', id: 'clip-hint' }, ['Playground has no door recording. Choose an MP4, MOV, or WebM under 40 MB. Use a door view, with the person or parcel in the lower half. CareBell runs a person model, a pose/fall model, a parcel model, and a knock model on this computer. Waiting needs the same person near the door for one minute. It reads the file here and does not send it to Ring.']);
-  const picker = el('input', {
-    type: 'file',
-    accept: 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm',
-    id: 'clip-file',
-    'aria-describedby': 'clip-hint'
-  });
-  const status = el('p', { role: 'status' }, ['']);
-  const button = el('button', {
-    type: 'button',
-    class: 'btn-primary',
-    onclick: async () => {
-      const file = picker.files && picker.files[0];
-      if (!file) {
-        status.textContent = 'Choose a door recording first.';
-        announce('Choose a door recording first.');
-        return;
-      }
-      button.disabled = true;
-      status.textContent = 'Looking at the recording…';
-      try {
-        const body = new FormData();
-        body.append('file', file, file.name || 'clip.mp4');
-        apply(await request('/api/demo/video', { method: 'POST', body }));
-        status.textContent = '';
-      } catch (error) {
-        status.textContent = error.message || 'CareBell could not read that recording.';
-        announce(status.textContent);
-      } finally {
-        button.disabled = false;
-      }
-    }
-  }, ['Look at this recording']);
-  return el('section', { class: 'card' }, [
-    el('h2', {}, ['Try a door recording']),
-    hint,
-    el('label', { class: 'check', for: 'clip-file' }, ['Door recording']),
-    picker,
-    button,
-    status
-  ]);
 }
 
 function demoBar() {
@@ -481,7 +651,14 @@ function clockMinutes(time) {
 }
 
 const CLUSTER_KINDS = new Set(['doorbell', 'person', 'vehicle', 'motion', 'package', 'knock', 'loitering']);
-const TAG_ORDER = ['doorbell', 'person', 'vehicle', 'motion', 'anomaly', 'late', 'rule', 'offline', 'online', 'system'];
+const TAG_ORDER = ['fall', 'package', 'knock', 'loitering', 'doorbell', 'person', 'vehicle', 'motion', 'anomaly', 'late', 'rule', 'offline', 'online', 'system'];
+const HEADLINE_KINDS = ['fall', 'package', 'knock', 'loitering'];
+
+function headlineEvent(events) {
+  return events.find((event) => event.familiarName)
+    || events.find((event) => HEADLINE_KINDS.includes(event.kind))
+    || (events.length === 1 ? events[0] : null);
+}
 
 function groupEvents(rows) {
   const groups = [];
@@ -526,67 +703,81 @@ function photoEvent(events) {
 }
 
 function renderWatch() {
-  const bedside = state.banner && state.settings.bedsideMode && state.banner.level === 'critical';
+  const bedside = state.banner && state.settings.bedsideMode && state.banner.level === 'critical' && !touring();
   const groups = groupEvents(state.today.moments);
   const pieces = [
     bedside ? '' : (state.banner ? renderAlert(state.banner, true) : quietPanel()),
-    doorHealth(),
+    state.demoTour && state.demoTour.live ? el('section', { class: 'card' }, [
+      el('h2', {}, ['Live door']),
+      el('p', { class: 'hint' }, ['This is the official Ring live stream for the Playground doorbell. CareBell opens it on this computer and does not send the video back to Ring as a file.']),
+      liveBlock()
+    ]) : '',
     el('section', { class: 'card' }, [
       el('h2', {}, ['At the door today']),
       groups.length
         ? el('div', {}, groups.map((events) => {
-          const named = events.find((event) => event.familiarName);
+          const headline = headlineEvent(events);
           const photo = photoEvent(events);
           return el('div', { class: 'moment' }, [
             el('span', { class: 'when' }, [timeSpan(events)]),
             tagRow(events),
-            named ? el('h3', { class: 'named' }, [named.title]) : '',
-            named && photo ? el('img', { class: 'thumb', src: photo.snapshotUrl, alt: '' }) : ''
+            headline ? el('h3', { class: 'named' }, [headline.title]) : '',
+            headline && photo ? el('img', { class: 'thumb', src: photo.snapshotUrl, alt: '' }) : ''
           ]);
         }))
         : el('p', {}, ['Nothing new today. Yesterday is in the family log.'])
     ]),
-    clipBar(),
+    tourBar(),
     state.mode === 'live' ? '' : demoBar()
   ];
   return pieces;
 }
 
-function doorHealth() {
-  if (!state || state.mode !== 'live') return '';
-  const door = state.door || {};
-  const choices = door.choices || [];
-  const picker = choices.length > 1
-    ? el('fieldset', {}, [
-      el('legend', {}, ['Which door to watch']),
-      ...choices.map((choice) => {
-        const input = el('input', { type: 'radio', name: 'watched-door', value: choice.key });
-        input.checked = Boolean(choice.watching);
-        input.addEventListener('change', () => chooseDoor(choice.key));
-        return el('label', { class: 'check' }, [input, choice.name]);
-      })
+function tourStrip() {
+  const tour = state.demoTour;
+  return el('div', { class: 'tour', id: 'tour-strip' }, [
+    el('div', { class: 'wrap tour-inner' }, [
+      el('p', { class: 'tour-kicker' }, [`2:56 demo · ${tour.clock} left · ${tour.index} of ${tour.count}`]),
+      el('strong', {}, [tour.title]),
+      el('p', {}, [tour.detail]),
+      el('button', { type: 'button', class: 'btn-light', onclick: stopTour }, ['Stop demo'])
     ])
-    : '';
-  return el('section', { class: 'card' }, [
-    el('h2', {}, ['Door health']),
-    el('p', { class: 'health-line', role: 'status' }, [
-      door.line || (state.playground && state.playground.error) || 'Checking the doorbell…'
-    ]),
-    door.motion ? el('p', { class: 'health-line' }, [door.motion]) : '',
-    picker
   ]);
 }
 
-async function chooseDoor(key) {
+function tourBar() {
+  if (state.demoTour && state.demoTour.active) return '';
+  return el('section', { class: 'card' }, [
+    el('h2', {}, ['Play a 3-minute demo']),
+    el('p', { class: 'hint' }, ['Watch each door alert, then Today, the family log, People, and Care. A real wait still needs one minute. This tour shows the waiting alert you would see.']),
+    el('button', { type: 'button', class: 'btn-primary', onclick: startTour }, ['Start the demo'])
+  ]);
+}
+
+async function startTour() {
+  primeAudio();
+  if (window.speechSynthesis) speechSynthesis.getVoices();
   try {
-    apply(await request('/api/door', {
+    apply(await request('/api/demo/tour', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key })
+      body: JSON.stringify({ action: 'start' })
     }));
-    announce('CareBell is watching that door.');
-  } catch (error) {
-    announce(error.message || 'That door was not selected.');
+  } catch {
+    announce('The demo could not start. Sign in and try again.');
+  }
+}
+
+async function stopTour() {
+  stopTourSpeech();
+  try {
+    apply(await request('/api/demo/tour', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stop' })
+    }));
+  } catch {
+    announce('The demo is still running. Please try again.');
   }
 }
 
@@ -684,8 +875,7 @@ function renderLog() {
     const photo = photoEvent(events);
     const clipSource = events.find((event) => event.clipUrl)
       || events.find((event) => ['doorbell', 'person'].includes(event.kind));
-    const alone = events.length === 1 && !CLUSTER_KINDS.has(lead.kind);
-    const named = events.find((event) => event.familiarName);
+    const headline = headlineEvent(events);
     const item = el('article', {
       class: 'log-item',
       'aria-label': `${span}. ${kinds.map((kind) => KIND[kind] || 'Record').join(', ')}.`
@@ -697,8 +887,8 @@ function renderLog() {
     const text = el('div', {}, [
       el('p', {}, [el('span', { class: 'when' }, [span])]),
       tagRow(events),
-      named ? el('h3', {}, [named.title]) : (alone ? el('h3', {}, [lead.title]) : ''),
-      named ? el('p', {}, [named.detail]) : (alone ? el('p', {}, [lead.detail]) : ''),
+      headline ? el('h3', {}, [headline.title]) : '',
+      headline ? el('p', {}, [headline.detail]) : '',
       clipBlock(clipSource),
       photo ? el('button', { type: 'button', onclick: () => rememberPerson(photo) }, ['This is someone I know']) : '',
       notes.length ? el('p', { class: 'meta' }, [notes.join(' · ')]) : ''
@@ -1328,8 +1518,12 @@ function showView(next) {
   content.focus();
 }
 
+function demoRequested() {
+  return new URLSearchParams(window.location.search).get('demo') === '1';
+}
+
 function showIntro() {
-  if (localStorage.getItem('carebell-intro')) return;
+  if (demoRequested() || localStorage.getItem('carebell-intro')) return;
   const dialog = el('dialog', {}, [
     el('h2', {}, ['Door events, in words the household can use']),
     el('p', {}, ['Door: large text and color when someone presses the bell.']),
@@ -1361,6 +1555,12 @@ function setSize(size) {
 document.getElementById('size-standard').addEventListener('click', () => setSize('standard'));
 document.getElementById('size-large').addEventListener('click', () => setSize('large'));
 document.body.addEventListener('pointerdown', primeAudio, { once: true });
+document.body.addEventListener('keydown', primeAudio, { once: true });
+if (window.speechSynthesis) {
+  speechSynthesis.addEventListener('voiceschanged', () => {
+    if (pendingTourSpeech && touring() && !speechSynthesis.speaking) speakTourLine(pendingTourSpeech);
+  });
+}
 setSize(localStorage.getItem('carebell-size') || 'large');
 
 function startApp(data) {
@@ -1369,6 +1569,9 @@ function startApp(data) {
   const stream = new EventSource('/api/stream');
   stream.onmessage = (event) => apply(JSON.parse(event.data));
   stream.onerror = () => { document.getElementById('mode').textContent = 'Reconnecting…'; };
+  if (demoRequested() && !(data.demoTour && data.demoTour.active)) {
+    startTour();
+  }
 }
 
 function showAuth() {

@@ -147,7 +147,7 @@ function packageFrom(frames: FrameObservation[]): VisionEvent | null {
   for (const frame of frames) {
     const people = frame.tracks.filter((track) => track.class === 'person' && track.source !== 'motion');
     const parcels = frame.tracks.filter((track) => {
-      if (track.class !== 'package' || !inRegion(track.cx, track.cy, ROI.doorstep, frame.width, frame.height)) return false;
+      if (track.class !== 'package' || !inRegion(track.cx, track.cy, ROI.porch, frame.width, frame.height)) return false;
       return !people.some((person) => overlap(person, track) || centers(person, track) < span * 0.18);
     });
     if (!parcels.length) continue;
@@ -163,12 +163,11 @@ function packageFrom(frames: FrameObservation[]): VisionEvent | null {
   }
   if (!placed) return null;
   const latestPeople = latest.tracks.filter((track) => track.class === 'person' && track.source !== 'motion');
-  const latestParcel = latest.tracks.find((track) => track.class === 'package');
-  if (latestParcel && latestPeople.some((person) => overlap(person, latestParcel) || centers(person, latestParcel) < span * 0.2)) {
-    return null;
-  }
+  const latestParcel = latest.tracks.find((track) => track.class === 'package' && inRegion(track.cx, track.cy, ROI.porch, latest.width, latest.height));
+  const holding = Boolean(latestParcel && latestPeople.some((person) => overlap(person, latestParcel) || centers(person, latestParcel) < span * 0.2));
+  if (holding) return null;
   if (latestParcel && !associated && latestParcel.box.area > (latest.width * latest.height * 0.08)) return null;
-  left = left || !latestPeople.length;
+  left = left || Boolean(latestParcel && !holding);
   if (!(left || (associated && separated && remains >= 2))) return null;
   if (scorePackage(frames) < 0.28) return null;
   let confidence = 0.58;

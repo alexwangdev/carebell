@@ -39,7 +39,7 @@ function fillRect(data: Uint8Array, width: number, x: number, y: number, w: numb
 
 export function sceneJpeg(
   kind: 'empty' | 'package' | 'standing' | 'fall' | 'car' | 'knock' | 'handoff',
-  options: { personX?: number } = {}
+  options: { personX?: number; paleBox?: boolean } = {}
 ): Buffer {
   const width = 320;
   const height = 180;
@@ -47,7 +47,14 @@ export function sceneJpeg(
   fillRect(data, width, 0, 0, width, 80, 150, 190, 220);
   fillRect(data, width, 0, 80, width, 100, 186, 184, 176);
   const personX = Number.isFinite(options.personX) ? Number(options.personX) : 148;
-  if (kind === 'package' || kind === 'handoff') fillRect(data, width, 118, 118, 84, 42, 168, 112, 58);
+  if (kind === 'package' || kind === 'handoff') {
+    if (options.paleBox) {
+      fillRect(data, width, 64, 96, 200, 78, 42, 42, 46);
+      fillRect(data, width, 118, 118, 84, 42, 214, 184, 132);
+    } else {
+      fillRect(data, width, 118, 118, 84, 42, 168, 112, 58);
+    }
+  }
   if (kind === 'standing' || kind === 'knock' || kind === 'handoff') fillRect(data, width, personX, 48, 36, 108, 42, 42, 52);
   if (kind === 'fall') fillRect(data, width, 78, 122, 164, 38, 42, 42, 52);
   if (kind === 'car') fillRect(data, width, 20, 86, 250, 48, 28, 28, 32);
@@ -167,6 +174,7 @@ export function canRewriteKind(kind: string | undefined, familiarName?: string, 
   const current = String(kind || '');
   if (['system', 'anomaly', 'late', 'rule', 'offline', 'online'].includes(current)) return false;
   if (next === 'fall') return current !== 'fall';
+  if (next === 'package') return current !== 'fall' && current !== 'vehicle' && !(current === 'person' && Boolean(familiarName));
   if (current === 'fall' || current === 'doorbell' || current === 'vehicle') return false;
   if (current === 'person' && familiarName) return false;
   return true;

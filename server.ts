@@ -12,7 +12,7 @@ import * as ringlink from './lib/ringlink';
 import * as rules from './lib/rules';
 import * as gemini from './lib/gemini';
 import { matchPeople, describeMatch, cleanName, cleanRelation, dhash } from './lib/people';
-import { canRewriteKind, DoorWatchAgent, framesFromVideo, observeHousehold, readVideoFrames, sceneCopy, sceneFromEvents, sceneJpeg } from './lib/vision';
+import { analyzeDoorPhoto, analyzeDoorVideo, canRewriteKind, DoorWatchAgent, framesFromVideo, observeHousehold, readVideoFrames, sceneCopy, sceneFromEvents, sceneJpeg } from './lib/vision';
 import { videoFromRequest } from './lib/upload';
 import {
   newId,
@@ -25,6 +25,10 @@ import {
   createWebhookBody,
   translateWebhook,
   isActivity,
+  alreadyHaveDoorMoment,
+  shouldRaiseDoorAlert,
+  applyPlaygroundDingHold,
+  restoreHeldDing,
   summarizeDay,
   routineStatus,
   buildSampleDay,
@@ -35,6 +39,14 @@ import {
 } from './lib/domain';
 import type { Alert, DoorEvent, HttpError, StoreDoc } from './lib/types';
 
+function demoTour(): typeof import('./lib/demo-tour') | null {
+  try {
+    return require('./lib/demo-tour');
+  } catch {
+    return null;
+  }
+}
+
 loadEnv();
 
 type ServerResponse = http.ServerResponse & { corsHeaders?: Record<string, string> };
@@ -44,10 +56,11 @@ const PUBLIC = path.resolve(__dirname, 'public');
 const SECURITY = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
-  'Content-Security-Policy': "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; media-src 'self'; base-uri 'none'; form-action 'self'"
+  'Content-Security-Policy': "default-src 'self'; img-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; media-src 'self' blob:; base-uri 'none'; form-action 'self'"
 };
 const clients = new Set<{ res: ServerResponse; userId?: string }>();
 const bedrockPending = new Set<string>();
+const tours = new Map<string, { index: number; endsAt: number; stepEndsAt: number; timer: ReturnType<typeof setTimeout> | null }>();
 let booted = false;
 
 function linkCookie(nonce: unknown, time: unknown): string {
@@ -288,6 +301,7 @@ function viewModel() {
       deviceName: ringView.deviceName,
       error: ringView.error
     },
+    demoTour: tourModel(),
     door: ringView.door,
     chimeLine: ringView.chimeLine,
     ringApp: {
@@ -369,7 +383,7 @@ function makeAlert(data: any, event: any, extra: any = {}): any {
     detail: extra.detail || event.detail,
     snapshotUrl: '',
     snapshotNote: '',
-    acked: false,
+    acked: Boolean(tours.has(tourUserId()) && !extra.drill),
     drill: Boolean(extra.drill),
     contactName: data.settings.emergencyName,
     chimeMessage: demoDoorbell
@@ -402,7 +416,23 @@ function applyDoorScene(data: StoreDoc, event: any, alert: any, scene: { package
   event.level = copy.level;
   event.alwaysNotify = copy.alwaysNotify;
   if (scene.note) event.snapshotNote = scene.note;
+  const atMs = Date.parse(event.at) || Date.now();
+  if (!alert && event.id) {
+    alert = data.alerts.find((item) => item.eventId === event.id && !item.acked)
+      || data.alerts.find((item) => item.eventId === event.id);
+  }
+  if (alert && alert.acked) {
+    event.notified = true;
+    return alert;
+  }
   if (alert) {
+    const others = data.alerts.filter((item) => item.id !== alert.id);
+    if (!shouldRaiseDoorAlert(others, copy.kind, atMs)) {
+      const idx = data.alerts.findIndex((item) => item.id === alert.id);
+      if (idx >= 0) data.alerts.splice(idx, 1);
+      event.notified = true;
+      return null;
+    }
     alert.kind = copy.kind;
     alert.title = copy.title;
     alert.detail = copy.detail;
@@ -410,16 +440,34 @@ function applyDoorScene(data: StoreDoc, event: any, alert: any, scene: { package
     alert.playSound = copy.playSound;
     if (scene.note) alert.snapshotNote = scene.note;
     event.notified = true;
+    if (copy.kind === 'package') ackNearbyDoorAlerts(data, event, alert.id);
     return alert;
   }
   if (!wantsAlert(data, event)) return alert;
+  if (!shouldRaiseDoorAlert(data.alerts, copy.kind, atMs)) {
+    event.notified = true;
+    if (copy.kind === 'package') ackNearbyDoorAlerts(data, event);
+    return alert;
+  }
   alert = makeAlert(data, event, { level: copy.level, detail: copy.detail });
   alert.playSound = copy.playSound;
   if (scene.note) alert.snapshotNote = scene.note;
   data.alerts.unshift(alert);
   if (data.alerts.length > 200) data.alerts.length = 200;
   event.notified = true;
+  if (copy.kind === 'package') ackNearbyDoorAlerts(data, event, alert.id);
   return alert;
+}
+
+function ackNearbyDoorAlerts(data: StoreDoc, event: any, keepId?: string) {
+  const at = Date.parse(event.at) || Number(event.timestampMs) || 0;
+  if (!at) return;
+  for (const item of data.alerts) {
+    if (item.id === keepId || item.acked || item.drill) continue;
+    if (!['doorbell', 'person', 'motion'].includes(String(item.kind))) continue;
+    const when = Date.parse(String(item.at || ''));
+    if (Number.isFinite(when) && Math.abs(when - at) < 12 * 60 * 1000) item.acked = true;
+  }
 }
 
 function enrichLater({ eventId, alertId, atTimestamp, start, end, chime, emptyNote }: any) {
@@ -456,7 +504,8 @@ function enrichLater({ eventId, alertId, atTimestamp, start, end, chime, emptyNo
         }) : null;
         await store.update((data: StoreDoc) => {
           const event = data.events.find((item) => item.id === eventId);
-          let alert = data.alerts.find((item) => item.id === alertId);
+          let alert = data.alerts.find((item) => item.id === alertId)
+            || data.alerts.find((item) => item.eventId === eventId);
           if (event) event.snapshotChecked = true;
           if (image && image.ok && bytes) {
             const ext = String(image.contentType).includes('png') ? 'png' : 'jpg';
@@ -467,9 +516,7 @@ function enrichLater({ eventId, alertId, atTimestamp, start, end, chime, emptyNo
             }
             if (alert) {
               alert.snapshotUrl = url;
-              alert.snapshotNote = videoFrames.length
-                ? 'CareBell looked at frames from the door recording on this computer.'
-                : image.note;
+              alert.snapshotNote = '';
             }
           } else if (alert) {
             alert.snapshotNote = (image && image.note) || emptyNote || 'No picture is available for this moment. The text alert still stands.';
@@ -499,8 +546,21 @@ function enrichLater({ eventId, alertId, atTimestamp, start, end, chime, emptyNo
               alert.clipNote = clip.note;
             }
           }
+          if (event && scene) event.sceneChecked = true;
           if (event && scene && (scene.package || scene.fall || scene.loitering || scene.knock)) {
             alert = applyDoorScene(data, event, alert, scene);
+          } else if (event && ((clip && clip.ok) || (image && image.ok)) && restoreHeldDing(event)) {
+            if (alert) {
+              alert.kind = event.kind;
+              alert.title = event.title;
+              alert.detail = event.detail;
+              alert.level = event.level;
+            } else if (wantsAlert(data, event) && shouldRaiseDoorAlert(data.alerts, event.kind, event.timestampMs || Date.parse(event.at) || Date.now())) {
+              alert = makeAlert(data, event);
+              data.alerts.unshift(alert);
+              if (data.alerts.length > 200) data.alerts.length = 200;
+              event.notified = true;
+            }
           }
         });
         broadcast();
@@ -565,6 +625,8 @@ async function handlePayload(raw: any, signature: any) {
     if (data.processed.length > 5000) data.processed.splice(0, data.processed.length - 5000);
     created = true;
     if (!event) return;
+    applyPlaygroundDingHold(event, ring.tokenSource());
+    if (isActivity(event) && alreadyHaveDoorMoment(data.events, event.timestampMs, event.kind)) return;
     if (isActivity(event)) {
       for (const alert of data.alerts) {
         if (alert.kind === 'anomaly' && !alert.drill && !alert.acked && alert.localDate === event.localDate) alert.acked = true;
@@ -577,7 +639,9 @@ async function handlePayload(raw: any, signature: any) {
         if (alert.kind === 'offline' && !alert.acked) alert.acked = true;
       }
     }
-    const notify = wantsAlert(data, event);
+    const notify = event.ringType !== 'ding'
+      && wantsAlert(data, event)
+      && shouldRaiseDoorAlert(data.alerts, event.kind, event.timestampMs || Date.parse(event.at) || Date.now());
     if (event.systemAction === 'pause') {
       data.settings.paused = true;
       data.settings.pauseReason = event.detail;
@@ -662,7 +726,196 @@ async function raiseScene(kind: 'package' | 'fall' | 'loitering' | 'knock') {
   broadcast();
 }
 
-async function raiseFromRecording(mp4: Buffer): Promise<{ code: number; error?: string }> {
+function tourUserId(): string {
+  return (context.current() && context.current().userId) || '';
+}
+
+function tourModel() {
+  const demo = demoTour();
+  const id = tourUserId();
+  const run = id ? tours.get(id) : null;
+  const steps = demo ? demo.demoTourSteps() : [];
+  const step = run ? steps[run.index] : null;
+  if (!run || !step) return { active: false };
+  return {
+    active: true,
+    id: step.id,
+    title: step.title,
+    detail: step.detail,
+    view: step.view,
+    index: run.index + 1,
+    count: steps.length,
+    remainingMs: Math.max(0, run.endsAt - Date.now()),
+    stepRemainingMs: Math.max(0, run.stepEndsAt - Date.now()),
+    totalMs: demo ? demo.demoTourDurationMs() : 0,
+    clock: demo ? demo.demoTourClock(Math.max(0, run.endsAt - Date.now())) : '0:00',
+    live: Boolean(step.live),
+    preloadLive: Boolean(step.preloadLive || step.live),
+    preloadClip: step.preloadClip || step.clip || '',
+    preloadShot: step.preloadShot || step.shot || '',
+    deviceId: step.deviceId || '',
+    kind: step.kind || '',
+    logKind: step.logKind || '',
+    say: step.say || ''
+  };
+}
+
+function stopTour(userId = tourUserId()): void {
+  const run = tours.get(userId);
+  if (run && run.timer) clearTimeout(run.timer);
+  tours.delete(userId);
+}
+
+async function ackOpenAlerts(): Promise<void> {
+  await store.update((data: StoreDoc) => {
+    data.alerts.forEach((alert) => {
+      alert.acked = true;
+    });
+  });
+}
+
+function mediaUrl(name?: string): string {
+  const file = path.basename(String(name || ''));
+  return file && store.mediaPath(file) ? `/media/${file}` : '';
+}
+
+async function raiseTourKnown(kind: 'package' | 'fall' | 'loitering' | 'knock', media: { clip?: string; shot?: string }): Promise<void> {
+  const clipUrl = mediaUrl(media.clip);
+  const shotUrl = mediaUrl(media.shot);
+  await store.update((data: StoreDoc) => {
+    const copy = sceneCopy({
+      package: kind === 'package',
+      fall: kind === 'fall',
+      loitering: kind === 'loitering',
+      knock: kind === 'knock',
+      note: '',
+      events: []
+    }, data.settings.emergencyName);
+    if (!copy) return;
+    const zoned = zonedParts(new Date(), data.settings.timeZone);
+    const event = {
+      id: newId(),
+      at: new Date().toISOString(),
+      localDate: zoned.localDate,
+      localTime: zoned.localTime,
+      kind: copy.kind,
+      title: copy.title,
+      detail: copy.detail,
+      deviceName: data.settings.deviceName,
+      timestampMs: Date.now(),
+      snapshotUrl: shotUrl,
+      snapshotNote: '',
+      clipUrl,
+      clipNote: '',
+      notified: true,
+      sample: false,
+      drill: true,
+      notifyKey: copy.notifyKey,
+      level: copy.level
+    };
+    const alert = makeAlert(data, event, { drill: true, level: copy.level, detail: copy.detail });
+    alert.snapshotUrl = shotUrl;
+    alert.snapshotNote = event.snapshotNote;
+    alert.clipUrl = clipUrl;
+    alert.clipNote = event.clipNote;
+    alert.playSound = copy.playSound;
+    data.events.push(event);
+    data.alerts.unshift(alert);
+  });
+}
+
+async function raiseTourKind(step: { kind?: string; clip?: string; shot?: string }): Promise<void> {
+  const kind = step.kind;
+  if (!kind) return;
+  await ackOpenAlerts();
+  if (kind === 'anomaly') {
+    await raiseAnomaly({ drill: true });
+    return;
+  }
+  if (kind === 'package' || kind === 'fall' || kind === 'loitering' || kind === 'knock') {
+    await raiseTourKnown(kind, { clip: step.clip, shot: step.shot });
+    return;
+  }
+  const payload = createWebhookBody({ kind });
+  await store.update((data: StoreDoc) => {
+    const event = translateWebhook(payload, data.settings);
+    if (!event) return;
+    event.drill = true;
+    event.notified = true;
+    const alert = makeAlert(data, event, { drill: true, level: event.level, detail: event.detail });
+    data.events.push(event);
+    data.alerts.unshift(alert);
+  });
+  broadcast();
+}
+
+async function connectStoredPlayground(): Promise<void> {
+  const fromEnv = String(process.env.RING_ACCESS_TOKEN || '').trim();
+  const current = context.current();
+  let fromFile = '';
+  try {
+    fromFile = fs.readFileSync(path.join(process.env.CAREBELL_DATA_DIR || path.join(__dirname, 'data'), 'playground-token'), 'utf8').trim();
+  } catch {
+    fromFile = '';
+  }
+  const token = fromEnv || fromFile || String((current && current.ringToken) || '').trim();
+  if (!token) return;
+  ring.saveToken(token);
+  if (current) current.ringToken = token;
+  const home = await ring.household();
+  if (home.unauthorized) return;
+  await store.update((data: StoreDoc) => {
+    data.settings.ringToken = token;
+    if (!data.settings.playgroundConnectedAt) data.settings.playgroundConnectedAt = Date.now();
+    if (home.doorbellName && (data.settings.deviceName === 'Front door' || data.settings.deviceName === '前门')) {
+      data.settings.deviceName = String(home.doorbellName).slice(0, 24);
+    }
+  });
+}
+
+async function runTourStep(userId: string, index: number): Promise<void> {
+  const demo = demoTour();
+  const steps = demo ? demo.demoTourSteps() : [];
+  const step = steps[index];
+  const run = tours.get(userId);
+  if (!run || !step) {
+    stopTour(userId);
+    broadcast();
+    return;
+  }
+  run.index = index;
+  run.stepEndsAt = Date.now() + step.holdMs;
+  if (step.connectPlayground) await connectStoredPlayground();
+  if (step.kind) await raiseTourKind(step);
+  broadcast();
+  if (index + 1 >= steps.length) {
+    run.timer = setTimeout(() => {
+      stopTour(userId);
+      broadcast();
+    }, step.holdMs);
+    return;
+  }
+  run.timer = setTimeout(() => {
+    runTourStep(userId, index + 1).catch(() => stopTour(userId));
+  }, step.holdMs);
+}
+
+async function startTour(): Promise<void> {
+  const userId = tourUserId();
+  const demo = demoTour();
+  if (!userId || !demo) return;
+  stopTour(userId);
+  await ackOpenAlerts();
+  tours.set(userId, {
+    index: 0,
+    endsAt: Date.now() + demo.demoTourDurationMs(),
+    stepEndsAt: Date.now(),
+    timer: null
+  });
+  await runTourStep(userId, 0);
+}
+
+async function raiseFromRecording(mp4: Buffer): Promise<{ code: number; error?: string; kind?: string; title?: string; snapshotUrl?: string; clipUrl?: string }> {
   const read = await readVideoFrames(mp4, { fps: 5, maxFrames: 40, startAt: 0 });
   const frames = read.frames;
   if (!frames.length) {
@@ -693,12 +946,14 @@ async function raiseFromRecording(mp4: Buffer): Promise<{ code: number; error?: 
       error: `CareBell read ${frames.length} frames and did not notice a fall, a parcel left behind, the same person waiting for one minute, or a knock. Use a door view, with the person or parcel in the lower half of the picture.`
     };
   }
+  let snapshotUrl = '';
+  let clipUrl = '';
   await store.update((data: StoreDoc) => {
     const zoned = zonedParts(new Date(), data.settings.timeZone);
     const still = frames[frames.length - 1].jpeg;
     const shot = store.saveMedia(`${newId()}.jpg`, still);
-    const clipUrl = store.saveMedia(`${newId()}.mp4`, mp4);
-    const note = 'This is a recording you loaded. CareBell looked at its frames on this computer. It was not sent to Ring.';
+    clipUrl = store.saveMedia(`${newId()}.mp4`, mp4);
+    snapshotUrl = shot;
     const event = {
       id: newId(),
       at: new Date().toISOString(),
@@ -709,10 +964,10 @@ async function raiseFromRecording(mp4: Buffer): Promise<{ code: number; error?: 
       detail: copy.detail,
       deviceName: data.settings.deviceName,
       timestampMs: Date.now(),
-      snapshotUrl: shot,
-      snapshotNote: note,
+      snapshotUrl,
+      snapshotNote: '',
       clipUrl,
-      clipNote: 'This is the recording you loaded.',
+      clipNote: '',
       notified: true,
       sample: false,
       drill: true,
@@ -720,16 +975,67 @@ async function raiseFromRecording(mp4: Buffer): Promise<{ code: number; error?: 
       level: copy.level
     };
     const alert = makeAlert(data, event, { drill: true, level: copy.level, detail: copy.detail });
-    alert.snapshotUrl = shot;
-    alert.snapshotNote = note;
+    alert.snapshotUrl = snapshotUrl;
+    alert.snapshotNote = '';
     alert.clipUrl = clipUrl;
-    alert.clipNote = event.clipNote;
+    alert.clipNote = '';
     alert.playSound = copy.playSound;
     data.events.push(event);
     data.alerts.unshift(alert);
   });
   broadcast();
-  return { code: 200 };
+  return { code: 200, kind: copy.kind, title: copy.title, snapshotUrl, clipUrl };
+}
+
+function looksLikeJpeg(bytes: Buffer): boolean {
+  return bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8;
+}
+
+async function raiseFromStill(jpeg: Buffer): Promise<{ code: number; error?: string; kind?: string; title?: string; snapshotUrl?: string; clipUrl?: string }> {
+  if (!looksLikeJpeg(jpeg)) {
+    return { code: 400, error: 'Choose a JPEG door picture, or an MP4 or MOV under 40 MB.' };
+  }
+  const contactName = store.get().settings.emergencyName;
+  const scene = await analyzeDoorPhoto(jpeg, contactName);
+  const copy = sceneCopy(scene, contactName);
+  if (!copy) {
+    return {
+      code: 400,
+      error: 'CareBell looked at this picture on this computer and did not notice a fall, a parcel left behind, a knock, or someone waiting. Use a door view, with the person or parcel in the lower half.'
+    };
+  }
+  let snapshotUrl = '';
+  await store.update((data: StoreDoc) => {
+    const zoned = zonedParts(new Date(), data.settings.timeZone);
+    const shot = store.saveMedia(`${newId()}.jpg`, jpeg);
+    snapshotUrl = shot;
+    const event = {
+      id: newId(),
+      at: new Date().toISOString(),
+      localDate: zoned.localDate,
+      localTime: zoned.localTime,
+      kind: copy.kind,
+      title: copy.title,
+      detail: copy.detail,
+      deviceName: data.settings.deviceName,
+      timestampMs: Date.now(),
+      snapshotUrl,
+      snapshotNote: '',
+      notified: true,
+      sample: false,
+      drill: true,
+      notifyKey: copy.notifyKey,
+      level: copy.level
+    };
+    const alert = makeAlert(data, event, { drill: true, level: copy.level, detail: copy.detail });
+    alert.snapshotUrl = snapshotUrl;
+    alert.snapshotNote = '';
+    alert.playSound = copy.playSound;
+    data.events.push(event);
+    data.alerts.unshift(alert);
+  });
+  broadcast();
+  return { code: 200, kind: copy.kind, title: copy.title, snapshotUrl };
 }
 
 async function raiseAnomaly({ drill }: any) {
@@ -1073,6 +1379,8 @@ async function pollHistory() {
     if (changed) broadcast();
     mediaJobs.forEach((job) => enrichLater(job));
     backfillSnapshots();
+    revisitDoorbellPackages();
+    await raiseMissedVisionAlerts();
   } catch {
     /* Playground polling retries on the next interval. */
   } finally {
@@ -1088,15 +1396,79 @@ function backfillSnapshots() {
   pending.forEach((event) => enrichLater({ eventId: event.id, atTimestamp: event.timestampMs, chime: false }));
 }
 
+async function raiseMissedVisionAlerts() {
+  let changed = false;
+  await store.update((data: StoreDoc) => {
+    for (const event of data.events) {
+      if (event.sample || event.notified) continue;
+      if (!['package', 'fall', 'loitering', 'knock'].includes(String(event.kind))) continue;
+      if (data.alerts.some((item) => item.eventId === event.id)) {
+        event.notified = true;
+        continue;
+      }
+      applyDoorScene(data, event, null, {
+        package: event.kind === 'package',
+        fall: event.kind === 'fall',
+        loitering: event.kind === 'loitering',
+        knock: event.kind === 'knock'
+      });
+      if (event.notified) changed = true;
+    }
+  });
+  if (changed) broadcast();
+}
+
+function mediaFromUrl(url: string): Buffer | null {
+  return store.readMediaFile(String(url || '').replace(/^\/media\//, ''));
+}
+
+function revisitDoorbellPackages() {
+  const userId = context.current() && context.current().userId;
+  if (!userId) return;
+  const pending = store.get().events
+    .filter((event) => !event.sample && event.kind === 'doorbell' && !event.sceneChecked && (event.clipUrl || event.snapshotUrl))
+    .sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0))
+    .slice(0, 4);
+  pending.forEach((event) => {
+    setImmediate(() => {
+      accounts.run(userId, async () => {
+        try {
+          const clip = event.clipUrl ? mediaFromUrl(event.clipUrl) : null;
+          const still = event.snapshotUrl && /\.jpe?g($|\?)/i.test(event.snapshotUrl) ? mediaFromUrl(event.snapshotUrl) : null;
+          const scene = clip
+            ? await analyzeDoorVideo(clip, { startAt: event.timestampMs })
+            : (still ? await analyzeDoorPhoto(still) : null);
+          await store.update((data: StoreDoc) => {
+            const current = data.events.find((item) => item.id === event.id);
+            if (!current) return;
+            current.sceneChecked = true;
+            if (!scene || !scene.package) return;
+            const alert = data.alerts.find((item) => item.eventId === current.id && !item.acked)
+              || data.alerts.find((item) => item.eventId === current.id);
+            applyDoorScene(data, current, alert, scene);
+          });
+          broadcast();
+        } catch {
+          /* The doorbell label stays if the saved clip cannot be read again. */
+        }
+      }).catch(() => {});
+    });
+  });
+}
+
 async function importHistoryEvent(item: any, kind: any, deviceName: any, since: any) {
   const historyId = item && item.id;
   const start = Number(item && item.attributes && item.attributes.start);
   if (!historyId || !start) return { created: false };
-  const key = `history:${historyId}:${kind}`;
+  const key = `history:${historyId}`;
   let created = false;
   let media: any = null;
   await store.update((data: StoreDoc) => {
-    if (data.processed.includes(key)) return;
+    if (data.processed.includes(key) || data.processed.includes(`${key}:${kind}`)) return;
+    if (alreadyHaveDoorMoment(data.events, start, kind)) {
+      data.processed.push(key);
+      return;
+    }
     data.processed.push(key);
     if (data.processed.length > 5000) data.processed.splice(0, data.processed.length - 5000);
     const when = new Date(start);
@@ -1118,9 +1490,14 @@ async function importHistoryEvent(item: any, kind: any, deviceName: any, since: 
       title,
       detail,
       notifyKey,
-      level
+      level,
+      ringType: ''
     };
-    const notify = start >= since && wantsAlert(data, event);
+    applyPlaygroundDingHold(event, ring.tokenSource());
+    const notify = start >= since
+      && event.ringType !== 'ding'
+      && wantsAlert(data, event)
+      && shouldRaiseDoorAlert(data.alerts, event.kind, start);
     event.notified = notify;
     data.events.push(event);
     if (data.events.length > 2000) data.events.splice(0, data.events.length - 2000);
@@ -1135,7 +1512,7 @@ async function importHistoryEvent(item: any, kind: any, deviceName: any, since: 
       settleRuleAlerts(data, event);
       alert = applyTimeRule(data, event, alert);
     }
-    if (kind === 'doorbell' || kind === 'person' || kind === 'motion') {
+    if (start >= since && (kind === 'doorbell' || kind === 'person' || kind === 'motion')) {
       media = {
         eventId: event.id,
         alertId: alert ? alert.id : '',
@@ -1243,6 +1620,9 @@ async function onRequest(req: any, res: any) {
     }
     send(res, result.code, { status: result.status });
     return;
+  }
+  if (req.method === 'GET' && (url.pathname === '/opencv' || url.pathname === '/opencv.html')) {
+    if (serveStatic(res, '/opencv.html')) return;
   }
   if (req.method === 'GET' && url.pathname === '/api/health') {
     send(res, 200, { ok: true, store: process.env.CAREBELL_STORE === 'dynamodb' ? 'dynamodb' : 'local' });
@@ -1384,18 +1764,19 @@ async function signedIn(req: any, res: any, url: any) {
       send(res, 400, { error: 'The live view could not start. Please try again.' });
       return;
     }
-    const opened = await ring.openLive(sdp);
+    const opened = await ring.openLive(sdp, body.deviceId);
     if (!opened.ok) {
       send(res, opened.status === 401 ? 401 : 502, { error: opened.error });
       return;
     }
     const id = newId();
+    const seconds = tours.has(tourUserId()) ? 60 : 30;
     const timer = setTimeout(() => {
       endLiveSession(id).catch(() => {});
-    }, 32000);
+    }, seconds * 1000 + 2000);
     timer.unref();
     liveSessions.set(id, { location: opened.location, timer });
-    send(res, 201, { sessionId: id, sdp: opened.sdp, seconds: 30 });
+    send(res, 201, { sessionId: id, sdp: opened.sdp, seconds });
     return;
   }
   if (req.method === 'DELETE' && /^\/api\/live\/[a-zA-Z0-9_-]+$/.test(url.pathname)) {
@@ -1448,6 +1829,35 @@ async function signedIn(req: any, res: any, url: any) {
     send(res, 200, viewModel());
     return;
   }
+  if (req.method === 'POST' && url.pathname === '/api/demo/vision') {
+    const raw = await readRaw(req, 40_000_000);
+    const type = String(req.headers['content-type'] || '');
+    let bytes: Buffer | null = null;
+    if (/application\/json/i.test(type)) {
+      const body = JSON.parse(raw.toString('utf8') || '{}');
+      bytes = store.readMediaFile(body.media || body.file) || store.readInboxClip(body.file);
+      if (!bytes) {
+        send(res, 400, { error: 'Put an MP4 or JPEG in data/media, or choose a file on this page.' });
+        return;
+      }
+    } else {
+      bytes = videoFromRequest(raw, type);
+    }
+    if (!bytes) {
+      send(res, 400, { error: 'Choose a door recording (MP4 or MOV) or a JPEG under 40 MB. CareBell reads it on this computer.' });
+      return;
+    }
+    const result = looksLikeJpeg(bytes) ? await raiseFromStill(bytes) : await raiseFromRecording(bytes);
+    if (result.code !== 200) {
+      send(res, result.code, { error: result.error });
+      return;
+    }
+    send(res, 200, {
+      ...viewModel(),
+      seen: { kind: result.kind, title: result.title, snapshotUrl: result.snapshotUrl, clipUrl: result.clipUrl }
+    });
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/api/demo') {
     if (ring.live() || process.env.DEMO_MODE === 'false') {
       send(res, 404, { error: 'Practice events are turned off.' });
@@ -1477,6 +1887,13 @@ async function signedIn(req: any, res: any, url: any) {
       send(res, result.code, { error: 'The practice event was not accepted.' });
       return;
     }
+    send(res, 200, viewModel());
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/demo/tour') {
+    const body = JSON.parse((await readRaw(req)).toString('utf8') || '{}');
+    if (body.action === 'stop') stopTour();
+    else await startTour();
     send(res, 200, viewModel());
     return;
   }

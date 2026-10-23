@@ -84,6 +84,16 @@ h2 { font-size: 1.7rem; line-height: 1.25; }
 
 .mode { margin-top: 12px; color: var(--muted); }
 
+.tour {
+  background: var(--brand);
+  color: #fff8e8;
+  padding: 14px 0 16px;
+}
+
+.tour-inner { display: grid; gap: 6px; }
+
+.tour-kicker { font-weight: 800; }
+
 button, .btn {
   font: inherit;
   color: var(--ink);
@@ -241,7 +251,7 @@ legend { font-weight: 800; padding: 0 6px; }
 
 label { display: block; font-weight: 700; margin-bottom: 6px; }
 
-input[type="text"], input[type="time"], input[type="number"], input[type="email"], input[type="password"], select {
+input[type="text"], input[type="time"], input[type="number"], input[type="email"], input[type="password"], input[type="file"], select {
   font: inherit;
   width: 100%;
   max-width: 280px;

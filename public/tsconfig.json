@@ -10,5 +10,5 @@
     "rootDir": ".",
     "removeComments": false
   },
-  "files": ["app.ts"]
+  "files": ["app.ts", "opencv.ts"]
 }

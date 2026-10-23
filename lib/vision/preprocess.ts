@@ -2,6 +2,7 @@ type OpenCv = any;
 
 export const ROI = {
   doorstep: { x: 0.12, y: 0.52, width: 0.76, height: 0.46 },
+  porch: { x: 0.06, y: 0.36, width: 0.88, height: 0.60 },
   door: { x: 0.32, y: 0.18, width: 0.36, height: 0.55 },
   entrance: { x: 0.18, y: 0.28, width: 0.64, height: 0.70 }
 };
@@ -29,6 +30,7 @@ function matToGrayBytes(mat: any): Uint8Array {
 
 export function preprocess(cv: OpenCv, rgba: { width: number; height: number; data: Uint8Array }, previousGray?: Uint8Array): {
   rgba: { width: number; height: number; data: Uint8Array };
+  sharp: { width: number; height: number; data: Uint8Array };
   gray: Uint8Array;
   motionMask?: Uint8Array;
   width: number;
@@ -82,6 +84,7 @@ export function preprocess(cv: OpenCv, rgba: { width: number; height: number; da
     kernel.delete();
     return {
       rgba: matToRgba(cv, blurred),
+      sharp: matToRgba(cv, resized),
       gray: matToGrayBytes(gray),
       motionMask,
       width,

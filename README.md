@@ -1,8 +1,10 @@
 # CareBell
 
-CareBell turns what a Ring doorbell sees into words a household can read, hear, and act on.
+CareBell is a door-watch app for people who are deaf or hard of hearing, older adults living alone, and the family who look after them.
 
-It is a door-watch app for people who are deaf or hard of hearing, older adults living alone, and the family members who care for them. Large text, bedside alerts, and spoken commands are first-class. CareBell talks to Ring only through official Ring APIs (`https://api.amazonvision.com`).
+A Ring doorbell already sees the door. CareBell turns that into large words, color, and sound the household can act on: someone at the door, a package left behind, a knock, someone waiting, or someone who may have fallen. Today becomes one plain sentence. The family log keeps the rest. A named person can be recognized from photos saved here. A stranger is not named.
+
+It talks to Ring only through official Ring APIs (`https://api.amazonvision.com`). Door clips and pictures are read on this computer. They are not sent back to Ring. Subscriptions and Chime volume stay in the Ring app.
 
 ## What it watches
 

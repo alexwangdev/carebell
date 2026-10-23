@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CareBell OpenCV test</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-size="large">
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="wrap head">
+    <p class="eyebrow">OpenCV file test</p>
+    <h1>Test a door file</h1>
+    <p class="lede">This page is not listed on Door. Sign in on CareBell first. After you run a file, open Door. The same household record shows the alert.</p>
+    <p class="hint" id="page-link">Page address: <code>http://127.0.0.1:3780/opencv</code></p>
+  </header>
+  <main id="content" class="wrap" tabindex="-1">
+    <section class="card stack">
+      <h2>Ring Playground</h2>
+      <p class="hint" id="playground-help">Generate a token in the Ring Playground and paste it here. CareBell stores it on this server and does not show it again.</p>
+      <p><a href="https://developer.amazon.com/ring/console/playground" target="_blank" rel="noopener noreferrer">Open the Ring Playground</a></p>
+      <label for="playground-token">Playground access token</label>
+      <input id="playground-token" type="password" autocomplete="off" spellcheck="false" aria-describedby="playground-help">
+      <div class="actions">
+        <button type="button" class="btn-primary" id="playground-connect">Connect</button>
+        <button type="button" id="playground-disconnect" hidden>Disconnect</button>
+      </div>
+      <p id="playground-status" role="status">Checking Playground…</p>
+    </section>
+    <section class="card stack">
+      <h2>Choose a file</h2>
+      <p class="hint" id="file-hint">Choose an MP4, MOV, or WebM under 40 MB, or a JPEG.</p>
+      <label class="check" for="clip-file">Door recording or picture</label>
+      <input id="clip-file" type="file" accept="video/mp4,video/quicktime,video/webm,image/jpeg,.mp4,.mov,.webm,.jpg,.jpeg" aria-describedby="file-hint">
+      <label for="media-name">Or a file name already in data/media</label>
+      <input id="media-name" type="text" autocomplete="off" placeholder="fall.jpeg">
+      <div class="actions">
+        <button type="button" class="btn-primary" id="run">Look at this file</button>
+      </div>
+      <p id="status" role="status"></p>
+      <div id="preview"></div>
+    </section>
+  </main>
+  <footer class="wrap foot">
+    <p>Door is at <code>http://127.0.0.1:3780/</code>. This tester does not add a button there.</p>
+  </footer>
+  <script src="/opencv.js"></script>
+</body>
+</html>

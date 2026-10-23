@@ -12,6 +12,9 @@ test('OpenCV 5 notices a package on the porch and a person who has fallen', asyn
   assert.equal(parcel.package, true);
   assert.equal(parcel.fall, false);
   assert.equal(parcel.events[0].type, 'PackageDeliveryEvent');
+  const pale = await analyzeDoorPhoto(sceneJpeg('package', { paleBox: true }));
+  assert.equal(pale.package, true);
+  assert.equal(pale.fall, false);
   const parcelCopy = sceneCopy(parcel, 'Daughter');
   assert.ok(parcelCopy);
   assert.equal(parcelCopy.kind, 'package');
@@ -113,6 +116,19 @@ test('a knock is repeated motion at the door, not a person standing still', asyn
   assert.equal(events.some((event) => event.type === 'FallEvent'), false);
 });
 
+test('OpenCV reads a door recording and notices a leftover parcel', async () => {
+  const mp4 = await videoFromJpegs([
+    sceneJpeg('empty'),
+    sceneJpeg('package', { paleBox: true }),
+    sceneJpeg('package', { paleBox: true })
+  ], { fps: 2 });
+  assert.ok(mp4 && mp4.length > 64);
+  const scene = await analyzeDoorVideo(mp4, { startAt: 1_000 });
+  assert.equal(scene.package, true);
+  assert.equal(scene.fall, false);
+  assert.equal(scene.events.some((event) => event.type === 'PackageDeliveryEvent'), true);
+});
+
 test('OpenCV reads a door recording and notices a fall', async () => {
   const mp4 = await videoFromJpegs([
     sceneJpeg('standing'),
@@ -203,12 +219,13 @@ test('event heads score a fall higher than an empty porch', () => {
   assert.ok(scorePackage([{ ...empty, objects: [{ class: 'package', x: 118, y: 118, width: 84, height: 42, area: 3528, cx: 160, cy: 139, source: 'model' }] } as any]) > 0.4);
 });
 
-test('a named visitor or a doorbell press is not rewritten as a package', () => {
+test('a leftover package can relabel a ding, but a named visitor stays a person', () => {
   assert.equal(canRewriteKind('person', 'a', 'package'), false);
-  assert.equal(canRewriteKind('doorbell', undefined, 'package'), false);
+  assert.equal(canRewriteKind('doorbell', undefined, 'package'), true);
   assert.equal(canRewriteKind('motion', undefined, 'package'), true);
   assert.equal(canRewriteKind('person', undefined, 'package'), true);
   assert.equal(canRewriteKind('doorbell', undefined, 'fall'), true);
+  assert.equal(canRewriteKind('doorbell', undefined, 'knock'), false);
   assert.equal(canRewriteKind('motion', undefined, 'knock'), true);
   assert.equal(canRewriteKind('motion', undefined, 'loitering'), true);
 });

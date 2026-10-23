@@ -167,6 +167,15 @@ export function saveMedia(filename: string, buffer: Buffer): string {
   return `/media/${filename}`;
 }
 
+export function readMediaFile(name: string): Buffer | null {
+  const file = path.basename(String(name || ''));
+  const full = mediaPath(file);
+  if (!full) return null;
+  const bytes = fs.readFileSync(full);
+  if (bytes.length < 32 || bytes.length > 40_000_000) return null;
+  return bytes;
+}
+
 export function mediaPath(filename: string): string | null {
   if (!/^[a-zA-Z0-9_-]+\.(svg|jpe?g|png|mp4)$/.test(filename)) return null;
   const { media } = locations();

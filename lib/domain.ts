@@ -255,6 +255,81 @@ export function isActivity(event: { kind?: string } | null | undefined): boolean
   return ['doorbell', 'person', 'vehicle', 'motion', 'package', 'fall', 'loitering', 'knock'].includes(event && event.kind ? event.kind : '');
 }
 
+export function alreadyHaveDoorMoment(
+  events: Array<{ sample?: boolean; kind?: string; timestampMs?: number }>,
+  timestampMs: number,
+  kind?: string,
+  windowMs = 90_000
+): boolean {
+  if (!timestampMs) return false;
+  const family = new Set(['person', 'motion', 'package', 'doorbell']);
+  return events.some((event) => {
+    if (event.sample || !event.timestampMs) return false;
+    if (Math.abs(event.timestampMs - timestampMs) >= windowMs) return false;
+    if (!kind || !event.kind || event.kind === kind) return true;
+    return family.has(kind) && family.has(event.kind);
+  });
+}
+
+export function suppressRepeatVisionAlert(
+  alerts: Array<{ kind?: string; at?: string; acked?: boolean; drill?: boolean }>,
+  kind: string,
+  _atMs?: number
+): boolean {
+  if (!['package', 'loitering', 'knock', 'fall'].includes(kind)) return false;
+  return alerts.some((alert) => alert.kind === kind && !alert.acked && !alert.drill);
+}
+
+export function shouldRaiseDoorAlert(
+  alerts: Array<{ kind?: string; at?: string; acked?: boolean; drill?: boolean }>,
+  kind: string,
+  atMs: number
+): boolean {
+  if (suppressRepeatVisionAlert(alerts, kind, atMs)) return false;
+  if ((kind === 'person' || kind === 'motion') && suppressRepeatVisionAlert(alerts, 'package', atMs)) return false;
+  return true;
+}
+
+export function holdPlaygroundDing(kind: string, source: string): boolean {
+  return kind === 'doorbell' && source === 'playground';
+}
+
+export function applyPlaygroundDingHold(event: {
+  kind?: string;
+  title?: string;
+  detail?: string;
+  notifyKey?: string | null;
+  level?: string;
+  ringType?: string;
+  deviceName?: string;
+}, source: string): boolean {
+  if (!holdPlaygroundDing(String(event.kind || ''), source)) return false;
+  event.ringType = 'ding';
+  event.kind = 'person';
+  event.title = 'Someone at the door';
+  event.detail = `${event.deviceName || 'Front door'} saw someone at the door.`;
+  event.notifyKey = 'person';
+  event.level = 'notice';
+  return true;
+}
+
+export function restoreHeldDing(event: {
+  kind?: string;
+  title?: string;
+  detail?: string;
+  notifyKey?: string | null;
+  level?: string;
+  ringType?: string;
+}): boolean {
+  if (event.ringType !== 'ding' || event.kind !== 'person') return false;
+  event.kind = 'doorbell';
+  event.title = 'Someone pressed the doorbell';
+  event.detail = 'Please look at the door. Open it if you can.';
+  event.notifyKey = 'doorbell';
+  event.level = 'critical';
+  return true;
+}
+
 function isIsolated(event: DoorEvent, list: DoorEvent[]): boolean {
   const at = minutes(event.localTime);
   return !list.some((other) => {
